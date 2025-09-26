@@ -9,11 +9,104 @@ local M = {
 		["X-GitHub-Api-Version"] = "2022-11-28",
 	},
 	schema_cache = {},
+	config = {
+		schema_mode = "api",
+		local_schema_cache_path = "~/.local/share/k8s-yaml-schemas", -- Used if schema_mode is "git_clone"
+		cache_ttl_hours = 12, -- Time to live for cached schemas in hours
+		disable_update = false, -- If true disable the cloning and pull of the git repository containin CRD schemas, in this case the user should manage the repository manually
+	},
 }
 
 M.schema_url = "https://raw.githubusercontent.com/" .. M.schemas_catalog .. "/" .. M.schema_catalog_branch
 M.flux_schemas_repo = "fluxcd-community/flux2-schemas"
 M.flux_schema_url = "https://raw.githubusercontent.com/" .. M.flux_schemas_repo .. "/main"
+M.git_clone_url = "https://github.com/" .. M.schemas_catalog .. ".git"
+-- Setup function to configure the plugin
+M.setup = function(opts)
+	opts = opts or {}
+	M.config = vim.tbl_deep_extend("force", M.config, opts)
+	if M.config.schema_mode ~= "api" and M.config.schema_mode ~= "git_clone" then
+		vim.notify(
+			"Invalid schema_mode: '"
+				.. M.config.schema_mode
+				.. "'. Valid values are: 'api', 'git_clone'. Using default 'api'.",
+			vim.log.levels.WARN
+		)
+		M.config.schema_mode = "api"
+	end
+	M.local_schema_cache_absolute_path = vim.fn.expand(M.config.local_schema_cache_path)
+	M.ttl_file_path = M.local_schema_cache_absolute_path .. "/.k8s_yaml_schemas_ttl"
+
+	if M.config.disable_update then
+		vim.notify("CRD schema auto-update is disabled. Please manage the local cache manually.", vim.log.levels.DEBUG)
+	end
+	if M.config.schema_mode ~= "git_clone" then
+		vim.notify("Using remote schemas.", vim.log.levels.DEBUG)
+	end
+	if not M.is_cache_expired(M.ttl_file_path, M.config.cache_ttl_hours) then
+		vim.notify("Cache TTL is still valid, skipping cache update.", vim.log.levels.DEBUG)
+	end
+
+	if
+		not M.config.disable_update
+		and M.config.schema_mode == "git_clone"
+		and M.is_cache_expired(M.ttl_file_path, M.config.cache_ttl_hours)
+	then
+		M.update_local_cache()
+	end
+end
+
+M.is_cache_expired = function(ttl_file_path, cache_ttl_hours)
+	if cache_ttl_hours <= 0 then
+		return true
+	end
+	local file = io.open(ttl_file_path, "r")
+	if not file then
+		return true
+	end
+	local timestamp = file:read("*a")
+	file:close()
+	local last_update = tonumber(timestamp)
+	if not last_update then
+		return true
+	end
+	local current_time = os.time()
+	local ttl_seconds = cache_ttl_hours * 3600
+	return (current_time - last_update) > ttl_seconds
+end
+
+M.update_ttl_file = function(ttl_file_path)
+	local file = io.open(ttl_file_path, "w")
+	if file then
+		file:write(tostring(os.time()))
+		file:close()
+	end
+end
+
+M.update_local_cache = function()
+	local crd_cache_path = M.local_schema_cache_absolute_path .. "/datreeio_crds"
+	vim.system({ "mkdir", "-p", crd_cache_path })
+
+	local git_clone_command = { "git", "clone", "-b", M.schema_catalog_branch, M.git_clone_url, crd_cache_path }
+	vim.system(git_clone_command, { text = true }, function(clone_obj)
+		if clone_obj.code == 0 then
+			vim.notify("Cloned CRD schemas to " .. crd_cache_path, vim.log.levels.INFO)
+		elseif clone_obj.code == 128 then
+			-- Repository already exists, perform git pull
+			local git_pull_command = { "git", "-C", crd_cache_path, "pull" }
+			vim.system(git_pull_command, { text = true }, function(pull_obj)
+				if pull_obj.code == 0 then
+					vim.notify("Updated CRD schemas in " .. crd_cache_path, vim.log.levels.INFO)
+				else
+					vim.notify("Failed to update CRD schemas: " .. pull_obj.stderr, vim.log.levels.ERROR)
+				end
+			end)
+		else
+			vim.notify("Failed to clone CRD schemas: " .. clone_obj.stderr, vim.log.levels.ERROR)
+		end
+	end)
+	M.update_ttl_file(M.ttl_file_path)
+end
 
 -- List CRD schemas from GitHub (include both json and yaml)
 M.list_github_tree = function()
@@ -145,7 +238,12 @@ M.init = function(bufnr)
 		end
 
 		if crd then
-			local schema_url = M.schema_url .. "/" .. crd
+			local schema_url
+			if M.config.schema_mode == "git_clone" then
+				schema_url = vim.fn.expand(M.config.local_schema_cache_path) .. "/datreeio_crds/" .. crd
+			else
+				schema_url = M.schema_url .. "/" .. crd
+			end
 			M.attach_schema(schema_url, "CRD schema for " .. crd, bufnr)
 		else
 			-- local api_version, kind = M.extract_api_version_and_kind(buffer_content)
