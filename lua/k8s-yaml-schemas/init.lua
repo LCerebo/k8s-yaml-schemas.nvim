@@ -12,8 +12,6 @@ local M = {
 }
 
 M.schema_url = "https://raw.githubusercontent.com/" .. M.schemas_catalog .. "/" .. M.schema_catalog_branch
-M.flux_schemas_repo = "fluxcd-community/flux2-schemas"
-M.flux_schema_url = "https://raw.githubusercontent.com/" .. M.flux_schemas_repo .. "/main"
 
 -- List CRD schemas from GitHub (include both json and yaml)
 M.list_github_tree = function()
@@ -107,7 +105,6 @@ M.get_kubernetes_schema_url = function(api_version, kind)
 	if r2.status == 200 then
 		return url_without_version
 	end
-
 	return nil
 end
 
@@ -135,14 +132,6 @@ M.init = function(bufnr)
 		local api_version, kind = M.extract_api_version_and_kind(buffer_content)
 
 		local crd = M.match_crd(api_version, kind)
-		-- Try Flux match
-		if api_version and kind then
-			local flux_url, flux_name = M.match_flux_crd(api_version, kind)
-			if flux_url then
-				M.attach_schema(flux_url, "Flux schema for " .. flux_name, bufnr)
-				return
-			end
-		end
 
 		if crd then
 			local schema_url = M.schema_url .. "/" .. crd
@@ -165,43 +154,6 @@ M.init = function(bufnr)
 					vim.log.levels.WARN
 				)
 			end
-		end
-	end
-end
-
-M.list_flux_schemas = function()
-	if M.schema_cache.flux then
-		return M.schema_cache.flux
-	end
-	local url = M.github_base_api_url .. "/" .. M.flux_schemas_repo .. "/contents"
-	local response = curl.get(url, { headers = M.github_headers })
-	local files = vim.fn.json_decode(response.body)
-	local schemas = {}
-	for _, file in ipairs(files) do
-		if file.name:match("%.json$") and file.name ~= "_definitions.json" and file.name ~= "all.json" then
-			table.insert(schemas, file.name)
-		end
-	end
-	M.schema_cache.flux = schemas
-	return schemas
-end
-
-M.match_flux_crd = function(api_version, kind)
-	local group, version = api_version:match("([^/]+)/([^/]+)")
-	if not group or not version then
-		return nil
-	end
-
-	local group_segment = group:match("([^.]+)")
-	if not group_segment then
-		return nil
-	end
-
-	local expected_filename = kind:lower() .. "-" .. group_segment .. "-" .. version .. ".json"
-	local all_flux = M.list_flux_schemas()
-	for _, fname in ipairs(all_flux) do
-		if fname == expected_filename then
-			return M.flux_schema_url .. "/" .. fname, fname
 		end
 	end
 end
