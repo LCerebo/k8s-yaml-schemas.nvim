@@ -31,6 +31,7 @@ Auto-attach Kubernetes & CRD schemas to `yaml-language-server` in Neovim
 ```lua
 {
   "LCerebo/k8s-yaml-schemas.nvim",
+  opts = {},
 }
 ```
 
