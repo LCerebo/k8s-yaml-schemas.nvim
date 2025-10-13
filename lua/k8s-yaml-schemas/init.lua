@@ -55,7 +55,7 @@ M.setup = function(opts)
 		M.log(
 			"Invalid schema_mode: '"
 				.. M.config.schema_mode
-				.. "'. Valid values are: 'api', 'git_clone'. Using default 'api'.",
+				.. "'. Valid values are: 'local', 'remote'. Using default 'local'.",
 			"warn"
 		)
 		M.config.schema_mode = "remote"
