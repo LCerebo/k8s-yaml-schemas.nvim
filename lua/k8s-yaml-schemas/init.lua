@@ -26,6 +26,12 @@ local M = {
 				subfolder = "master-standalone-strict",
 				branch = "master",
 			},
+			kustomize = {
+				repo = "/schemastore/schemastore",
+				subfolder = "src/schemas/json",
+				file = "kustomization.json",
+				branch = "master",
+			},
 		},
 	},
 }
@@ -122,64 +128,85 @@ M.update_ttl_file = function(ttl_file_path)
 	end
 end
 
-local clone_or_update_repository = function(repo, branch, subfolder)
+local clone_or_update_repository = function(repo, branch, subfolder, file)
 	local repo_path = M.local_schema_cache_absolute_path .. repo
 	vim.system({ "mkdir", "-p", repo_path })
-	local git_clone_command
-	if subfolder then
-		git_clone_command = {
-			"bash",
-			"-c",
-			"git clone --filter=blob:none --sparse --depth 1 -b "
-				.. branch
-				.. " "
-				.. M.github_clone_url
-				.. repo
-				.. ".git "
-				.. repo_path
-				.. " && git -C "
-				.. repo_path
-				.. " sparse-checkout set "
-				.. subfolder,
-		}
+	if file then
+		local download_url = M.github_raw_url .. repo .. "/refs/heads/" .. branch .. "/" .. subfolder .. "/" .. file
+		local download_path = repo_path .. "/" .. subfolder .. "/" .. file
+		vim.system({ "mkdir", "-p", repo_path .. "/" .. subfolder })
+		M.log(
+			"Downloading single file: '"
+				.. file
+				.. "' from url: '"
+				.. download_url
+				.. "' into: '"
+				.. download_path
+				.. "'.",
+			"debug"
+		)
+		curl.get(download_url, {
+			output = download_path,
+			follow_redirects = true,
+			overwrite = true,
+		})
 	else
-		git_clone_command = {
-			"git",
-			"clone",
-			"--depth",
-			"1",
-			"-b",
-			branch,
-			M.github_clone_url .. repo .. ".git",
-			repo_path,
-		}
-	end
-	M.log("Executing: " .. table.concat(git_clone_command, " "), "trace")
-	local git_pull_command = { "git", "-C", repo_path, "pull" }
-	vim.system(git_clone_command, { text = true }, function(clone_obj)
-		if clone_obj.code == 0 then
-			M.log("Cloned CRD schemas to " .. repo_path, "info")
-		elseif clone_obj.code == 128 then
-			-- Repository already exists, perform git pull
-			M.log("Executing " .. table.concat(git_pull_command, " "), "trace")
-			vim.system(git_pull_command, { text = true }, function(pull_obj)
-				if pull_obj.code == 0 then
-					M.log("Updated schemas in " .. repo_path, "info")
-				else
-					M.log("Failed to update schemas: " .. pull_obj.stderr, "error")
-				end
-			end)
+		local git_clone_command
+		if subfolder then
+			git_clone_command = {
+				"bash",
+				"-c",
+				"git clone --filter=blob:none --sparse --depth 1 -b "
+					.. branch
+					.. " "
+					.. M.github_clone_url
+					.. repo
+					.. ".git "
+					.. repo_path
+					.. " && git -C "
+					.. repo_path
+					.. " sparse-checkout set "
+					.. subfolder,
+			}
 		else
-			M.log("Failed to clone schemas: " .. clone_obj.stderr, "error")
+			git_clone_command = {
+				"git",
+				"clone",
+				"--depth",
+				"1",
+				"-b",
+				branch,
+				M.github_clone_url .. repo .. ".git",
+				repo_path,
+			}
 		end
-		M.log("Loading schema map...", "debug")
-		M.load_schema_map()
-	end)
+		M.log("Executing: " .. table.concat(git_clone_command, " "), "trace")
+		local git_pull_command = { "git", "-C", repo_path, "pull" }
+		vim.system(git_clone_command, { text = true }, function(clone_obj)
+			if clone_obj.code == 0 then
+				M.log("Cloned CRD schemas to " .. repo_path, "info")
+			elseif clone_obj.code == 128 then
+				-- Repository already exists, perform git pull
+				M.log("Executing " .. table.concat(git_pull_command, " "), "trace")
+				vim.system(git_pull_command, { text = true }, function(pull_obj)
+					if pull_obj.code == 0 then
+						M.log("Updated schemas in " .. repo_path, "info")
+					else
+						M.log("Failed to update schemas: " .. pull_obj.stderr, "error")
+					end
+				end)
+			else
+				M.log("Failed to clone schemas: " .. clone_obj.stderr, "error")
+			end
+			M.log("Loading schema map...", "debug")
+			M.load_schema_map()
+		end)
+	end
 end
 
 M.update_local_cache = function()
 	for _, repo_info in pairs(M.config.schemas_table) do
-		clone_or_update_repository(repo_info.repo, repo_info.branch, repo_info.subfolder)
+		clone_or_update_repository(repo_info.repo, repo_info.branch, repo_info.subfolder, repo_info.file)
 	end
 	M.update_ttl_file(M.ttl_file_path)
 end
@@ -278,6 +305,7 @@ M.attach_schema = function(schema_url, description, bufnr)
 	yaml_client.config.settings.yaml = yaml_client.config.settings.yaml or {}
 	yaml_client.config.settings.yaml.schemas = yaml_client.config.settings.yaml.schemas or {}
 	local bufname = vim.api.nvim_buf_get_name(bufnr)
+	M.log("Attaching schema URL: " .. schema_url .. " to buffer: " .. bufname, "debug")
 	yaml_client.config.settings.yaml.schemas[schema_url] = { bufname }
 	yaml_client.notify("workspace/didChangeConfiguration", {
 		settings = yaml_client.config.settings,
@@ -307,6 +335,7 @@ M.get_kubernetes_schema_url = function(api_version, kind)
 	end
 	return nil
 end
+
 M.load_schema_map = function()
 	M.log("Loading schema map from local cache...", "debug")
 	for _, repo_info in pairs(M.config.schemas_table) do
@@ -328,7 +357,13 @@ M.load_schema_map = function()
 					:gsub(vim.pesc(repo_path .. "/"), "")
 					:gsub(vim.pesc(".json"), "")
 					:gsub(vim.pesc("_"), vim.pesc("-"))
-				M.schemas_map[key] = json_file_path
+				-- Handle the schemastore kustomize schema special case that has only one file.
+				-- This is not a proper CRD or k8s resource, but it will be usefull to validate kustomization.yaml files.
+				if repo_info.repo == "/schemastore/schemastore" then
+					M.log("Adding kustomize schema with key: " .. key, "debug")
+					key = "kustomize.config.k8s.io/" .. key .. "-v1beta1"
+				end
+				M.schemas_map[key] = "file://" .. json_file_path
 			end
 		end
 	end
@@ -357,7 +392,15 @@ M.init = function(bufnr)
 			local resource_key = M.get_resource_key(api_version, kind)
 			M.log("Resource key: " .. resource_key, "debug")
 			local schema_path = M.schemas_map[resource_key]
-			M.attach_schema(schema_path, "from local path for " .. resource_key, bufnr)
+			if schema_path == nil or schema_path == "" then
+				M.log("No local schema found with resource_key: '" .. resource_key .. "'.", "warn")
+			else
+				M.log(
+					"Found schema_path: '" .. schema_path .. "' using resource_key: '" .. resource_key .. "'.",
+					"debug"
+				)
+				M.attach_schema(schema_path, "from local path for " .. resource_key, bufnr)
+			end
 		else
 			-- TODO merge in an optmized searh pattern with a map of remote schemas
 			local crd = M.match_crd(api_version, kind)
