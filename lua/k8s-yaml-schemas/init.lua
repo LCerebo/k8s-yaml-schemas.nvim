@@ -251,7 +251,7 @@ M.split_api_version = function(api_version)
 	return group, version
 end
 
-M.get_resource_key = function(api_version, kind)
+M.get_resource_key = function(api_version, kind, style)
 	local group, version = M.split_api_version(api_version)
 	if not version or not kind then
 		return nil
@@ -260,6 +260,8 @@ M.get_resource_key = function(api_version, kind)
 		return kind:lower() .. "-" .. version
 	elseif not string.find(group, "%.") then
 		return kind:lower() .. "-" .. group .. "-" .. version
+	elseif style == "k8s" then
+		return kind:lower() .. "-" .. group:gsub("%.k8s%.io", "") .. "-" .. version
 	else
 		return group .. "/" .. kind:lower() .. "-" .. version
 	end
@@ -390,16 +392,33 @@ M.init = function(bufnr)
 
 		if M.config.schema_mode == "local" then
 			local resource_key = M.get_resource_key(api_version, kind)
-			M.log("Resource key: " .. resource_key, "debug")
-			local schema_path = M.schemas_map[resource_key]
-			if schema_path == nil or schema_path == "" then
-				M.log("No local schema found with resource_key: '" .. resource_key .. "'.", "warn")
-			else
+			if resource_key == nil then
 				M.log(
-					"Found schema_path: '" .. schema_path .. "' using resource_key: '" .. resource_key .. "'.",
+					"Could not determine resource key from apiVersion: '"
+						.. api_version
+						.. "' and kind: '"
+						.. kind
+						.. "'.",
 					"debug"
 				)
-				M.attach_schema(schema_path, "from local path for " .. resource_key, bufnr)
+			else
+				M.log("Resource key: " .. resource_key, "debug")
+				local schema_path = M.schemas_map[resource_key]
+				-- try to match with k8s resources that are in a different format and have k8s.io extension like networking.k8s.io
+				if schema_path == nil or schema_path == "" then
+					resource_key = M.get_resource_key(api_version, kind, "k8s")
+					M.log("Trying to match resource key without .k8s.io suffix: '" .. resource_key .. "'.", "debug")
+					schema_path = M.schemas_map[resource_key]
+				end
+				if schema_path == nil or schema_path == "" then
+					M.log("No local schema found with resource_key: '" .. resource_key .. "'.", "warn")
+				else
+					M.log(
+						"Found schema_path: '" .. schema_path .. "' using resource_key: '" .. resource_key .. "'.",
+						"debug"
+					)
+					M.attach_schema(schema_path, "from local path for " .. resource_key, bufnr)
+				end
 			end
 		else
 			-- TODO merge in an optmized searh pattern with a map of remote schemas
